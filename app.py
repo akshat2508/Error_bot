@@ -8,7 +8,8 @@ from typing import Dict, Any
 from dotenv import load_dotenv
 import os
 load_dotenv() 
-# Configuration - Replace these with your actual values
+
+
 SUPABASE_URL =   os.getenv("SUPABASE_URL")
 SUPABASE_KEY =  os.getenv("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN =  os.getenv("TELEGRAM_BOT_TOKEN")
