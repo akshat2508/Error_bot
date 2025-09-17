@@ -1,7 +1,7 @@
 import requests
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, time as dt_time
 import json
 import sys
 from typing import Dict, Any
@@ -20,6 +20,9 @@ CHECK_INTERVAL = 60  # Check every 60 seconds
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 10
 
+# Daily report configuration
+DAILY_REPORT_TIME = dt_time(9, 0)  # Send daily report at 9:00 AM (24-hour format)
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -34,16 +37,65 @@ class SupabaseMonitor:
     def __init__(self):
         self.last_status = None
         self.consecutive_failures = 0
+        self.last_daily_report_date = None
+        self.daily_stats = {
+            'checks_today': 0,
+            'errors_today': 0,
+            'warnings_today': 0,
+            'total_downtime_minutes': 0,
+            'average_response_time': 0,
+            'response_times': []
+        }
         self.headers = {
             'apikey': SUPABASE_KEY,
             'Authorization': f'Bearer {SUPABASE_KEY}',
             'Content-Type': 'application/json'
         }
     
+    def reset_daily_stats(self):
+        """Reset daily statistics for a new day"""
+        self.daily_stats = {
+            'checks_today': 0,
+            'errors_today': 0,
+            'warnings_today': 0,
+            'total_downtime_minutes': 0,
+            'average_response_time': 0,
+            'response_times': []
+        }
+    
+    def update_daily_stats(self, health_status):
+        """Update daily statistics"""
+        self.daily_stats['checks_today'] += 1
+        
+        if health_status['status'] == 'error':
+            self.daily_stats['errors_today'] += 1
+            self.daily_stats['total_downtime_minutes'] += CHECK_INTERVAL / 60
+        elif health_status['status'] == 'warning':
+            self.daily_stats['warnings_today'] += 1
+        
+        if health_status.get('response_time'):
+            self.daily_stats['response_times'].append(health_status['response_time'])
+            self.daily_stats['average_response_time'] = sum(self.daily_stats['response_times']) / len(self.daily_stats['response_times'])
+    
+    def should_send_daily_report(self) -> bool:
+        """Check if it's time to send the daily report"""
+        now = datetime.now()
+        current_date = now.date()
+        current_time = now.time()
+        
+        # Check if it's a new day and we haven't sent today's report yet
+        if (self.last_daily_report_date != current_date and 
+            current_time >= DAILY_REPORT_TIME):
+            return True
+        return False
+    
     def send_telegram_alert(self, message: str, severity: str = "ERROR"):
         """Send alert message to Telegram bot"""
         try:
             emoji = "🚨" if severity == "ERROR" else "⚠️" if severity == "WARNING" else "ℹ️"
+            if severity == "DAILY_SUCCESS":
+                emoji = "✅"
+            
             formatted_message = f"{emoji} *Supabase Monitor Alert*\n\n"
             formatted_message += f"*Severity:* {severity}\n"
             formatted_message += f"*Time:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
@@ -64,6 +116,34 @@ class SupabaseMonitor:
             logging.error(f"Failed to send Telegram alert: {str(e)}")
         except Exception as e:
             logging.error(f"Unexpected error sending Telegram alert: {str(e)}")
+    
+    def send_daily_success_report(self):
+        """Send daily success report with statistics"""
+        uptime_percentage = 100 - (self.daily_stats['errors_today'] / max(self.daily_stats['checks_today'], 1) * 100)
+        
+        message = f"🌅 *Daily Supabase Status Report*\n\n"
+        message += f"*Date:* {datetime.now().strftime('%Y-%m-%d')}\n"
+        message += f"*Overall Status:* {'🟢 HEALTHY' if self.last_status == 'healthy' else '🔴 ISSUES DETECTED'}\n\n"
+        
+        message += f"*24-Hour Statistics:*\n"
+        message += f"• Health checks performed: {self.daily_stats['checks_today']}\n"
+        message += f"• Uptime: {uptime_percentage:.1f}%\n"
+        message += f"• Errors detected: {self.daily_stats['errors_today']}\n"
+        message += f"• Warnings: {self.daily_stats['warnings_today']}\n"
+        
+        if self.daily_stats['total_downtime_minutes'] > 0:
+            message += f"• Total downtime: {self.daily_stats['total_downtime_minutes']:.1f} minutes\n"
+        
+        if self.daily_stats['average_response_time'] > 0:
+            message += f"• Average response time: {self.daily_stats['average_response_time']:.1f}ms\n"
+        
+        message += f"\n*Current Status:* All systems operational ✅"
+        
+        self.send_telegram_alert(message, "DAILY_SUCCESS")
+        self.last_daily_report_date = datetime.now().date()
+        
+        # Reset daily stats for the new day
+        self.reset_daily_stats()
     
     def check_supabase_health(self) -> Dict[str, Any]:
         """Check Supabase API health by making a simple query"""
@@ -169,8 +249,15 @@ class SupabaseMonitor:
         
         while True:
             try:
+                # Check if it's time to send daily report
+                if self.should_send_daily_report() and self.last_status == 'healthy':
+                    self.send_daily_success_report()
+                
                 # Check main API health
                 health_status = self.check_supabase_health()
+                
+                # Update daily statistics
+                self.update_daily_stats(health_status)
                 
                 # Check specific endpoints
                 endpoints_status = self.check_specific_endpoints()
